@@ -1,12 +1,71 @@
 # ---------------------------
-# Script para clonar o actualizar todos los repos de un grupo en GitLab privado usando glab.exe
+# Script to clone or update repositories from a GitLab group (internationalizable)
+# Optimized version with console arguments and debug logs
 # ---------------------------
 
+param(
+    [string]$Lang,                # Forced language (e.g., es, en, fr...)
+    [string]$Hostname = "your-gitlab-server.com",  # TODO: Replace with your GitLab hostname
+    [string]$Group = "your-group/your-project",    # TODO: Replace with your group/project
+    [string]$Token = "YOUR_GITLAB_TOKEN_HERE",     # TODO: Replace with your GitLab personal token
+    [switch]$Debug                 # Enable debug logs
+)
+
+# ---------------------------
+# Load translations from JSON
+# ---------------------------
+$translationsFile = Join-Path $PSScriptRoot "i18n.json"
+if (-not (Test-Path $translationsFile)) {
+    Write-Error "Translation file not found: $translationsFile"
+    exit 1
+}
+
+$translations = Get-Content $translationsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+# Detect system language if not passed
+if (-not $Lang) {
+    $culture = (Get-Culture).TwoLetterISOLanguageName
+    if ($translations.PSObject.Properties.Name -contains $culture) {
+        $Lang = $culture
+    } else {
+        $Lang = "es"
+        Write-Host "System language ($culture) not available. Using Spanish (es)."
+    }
+}
+
+Write-Host ("Selected language: {0}" -f $Lang)
+
+$T = $translations.$Lang
+
+# ---------------------------
+# Translation function
+# ---------------------------
+function T {
+    param(
+        [string]$key,
+        [object]$arg = $null
+    )
+
+    $value = [string]($T.PSObject.Properties[$key].Value)
+
+    if ($Debug) { Write-Host "DEBUG: key='$key', value='$value', arg=$arg" }
+
+    if ($arg -ne $null) {
+        return [string]::Format($value, @($arg))
+    } else {
+        return $value
+    }
+}
+
+
+
+# ---------------------------
+# Check glab.exe
+# ---------------------------
 $localGlab = Join-Path $PSScriptRoot "glab.exe"
 
-# Comprobar glab.exe
 if (-Not (Test-Path $localGlab)) {
-    Write-Host "glab.exe no encontrado en el directorio actual. Buscando la última versión..."
+    Write-Host (T "glab_not_found")
     $query = @"
 {
   "query": "query { project(fullPath: \"gitlab-org/cli\") { releases(first: 1, sort: RELEASED_AT_DESC) { nodes { tagName assets { links { nodes { name directAssetUrl } } } } } } }",
@@ -15,71 +74,70 @@ if (-Not (Test-Path $localGlab)) {
 "@
 
     try {
-        $response = Invoke-RestMethod -Uri "https://gitlab.com/api/graphql" `
-            -Method Post `
-            -Headers @{ "Content-Type" = "application/json" } `
-            -Body $query
+        $response = Invoke-RestMethod -Uri "https://gitlab.com/api/graphql" -Method Post -Headers @{ "Content-Type" = "application/json" } -Body $query
 
         $latestTag = $response.data.project.releases.nodes[0].tagName
         $exeUrl = $response.data.project.releases.nodes[0].assets.links.nodes |
-            Where-Object { $_.name -eq "glab.exe" } |
-            Select-Object -ExpandProperty directAssetUrl
+                  Where-Object { $_.name -eq "glab.exe" } |
+                  Select-Object -ExpandProperty directAssetUrl
 
         if ($exeUrl) {
-            Write-Host "Descargando glab.exe ($latestTag) desde $exeUrl ..."
+            Write-Host (T "downloading" @($latestTag, $exeUrl))
             Invoke-WebRequest -Uri $exeUrl -OutFile $localGlab
 
             if (Test-Path $localGlab) {
-                Write-Host "glab.exe ($latestTag) descargado correctamente."
+                Write-Host (T "download_ok" @($latestTag))
             } else {
-                Write-Host "No se pudo descargar glab.exe. Revisa tu conexión o permisos."
+                Write-Host (T "download_fail")
                 exit 1
             }
         } else {
-            Write-Host "No se encontró el asset glab.exe en la última release."
+            Write-Host (T "asset_not_found")
             exit 1
         }
     } catch {
-        Write-Host "Error al obtener la última versión de glab.exe: $_"
+        Write-Host (T "error_fetch" @($_))
         exit 1
     }
 } else {
-    Write-Host "Se encontró glab.exe en el directorio actual."
+    Write-Host (T "found_local")
 }
 
 $glabCmd = $localGlab
 
-# Valores por defecto
-$HOSTNAME = "your-gitlab-server.com"  # TODO: Replace with your GitLab hostname
-$GROUP = "your-group/your-project"   # TODO: Replace with your group/project
-$TOKEN_PLAINTEXT = "YOUR_GITLAB_TOKEN_HERE"  # TODO: Replace with your GitLab personal token
-$escapedHostname = [Regex]::Escape($HOSTNAME)
+# ---------------------------
+# Default values
+# ---------------------------
+$escapedHostname = [Regex]::Escape($Hostname)
 $REGEXGITLAB = "^https://$escapedHostname/"
 $REGEXGITLABSSH = "${escapedHostname}:"
 
-Write-Host "Usando valores por defecto:"
-Write-Host "Hostname: $HOSTNAME"
-Write-Host "Grupo/Proyecto: $GROUP"
-Write-Host "Token: (oculto por seguridad)"
+Write-Host (T "defaults")
+Write-Host ("Hostname: {0}" -f $Hostname)
+Write-Host ("Group/Project: {0}" -f $Group)
+Write-Host "Token: (hidden for security)"
 
-# Desactivar verificación SSL temporalmente
+# ---------------------------
+# Environment setup
+# ---------------------------
 $env:GIT_SSL_NO_VERIFY = "true"
-
-# Activar rutas largas en Git
 git config --global core.longpaths true
 
-# Autenticación
-Write-Host "Autenticando en $HOSTNAME ..."
-& $glabCmd auth login --hostname $HOSTNAME --token $TOKEN_PLAINTEXT
+# ---------------------------
+# Authentication
+# ---------------------------
+Write-Host (T "authenticating" @($Hostname))
+& $glabCmd auth login --hostname $Hostname --token $Token
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error de autenticación. Revisa tu token o hostname."
+    Write-Host (T "auth_error")
     exit 1
 }
 
-# Carpeta base de repos: donde estés ejecutando el script
+# ---------------------------
+# Helper functions
+# ---------------------------
 $repoBase = Get-Location
 
-# Función para obtener todos los repositorios de un grupo y sus subgrupos
 function Get-GroupProjects {
     param ([string]$groupPath)
     $projects = @()
@@ -87,14 +145,14 @@ function Get-GroupProjects {
     $perPage = 100
     $encodedGroupPath = [uri]::EscapeDataString($groupPath)
     do {
-        $url = "https://$HOSTNAME/api/v4/groups/$encodedGroupPath/projects?per_page=$perPage&page=$page&include_subgroups=true"
-        $response = Invoke-RestMethod -Uri $url -Headers @{ "Private-Token" = $TOKEN_PLAINTEXT }
+        $url = "https://$Hostname/api/v4/groups/$encodedGroupPath/projects?per_page=$perPage&page=$page&include_subgroups=true"
+        $response = Invoke-RestMethod -Uri $url -Headers @{ "Private-Token" = $Token }
         if ($response) { $projects += $response; $page++ } else { break }
     } while ($response.Count -eq $perPage)
+    if ($Debug) { Write-Host ("DEBUG: Retrieved {0} projects from group {1}" -f $projects.Count, $groupPath) }
     return $projects
 }
 
-# Función auxiliar: genera ruta segura de destino a partir de la URL
 function Get-DestPathFromUrl {
     param([string]$repoUrl)
     $parsed = $repoUrl -replace "$REGEXGITLAB", "" -replace "^ssh://git@", "" -replace "^git@", "" -replace "$REGEXGITLABSSH", ""
@@ -105,40 +163,41 @@ function Get-DestPathFromUrl {
     return $destPath
 }
 
-# Función auxiliar: clona repo con git si falla glab
 function Clone-WithGit {
     param([string]$repoUrl)
     $destPath = Get-DestPathFromUrl $repoUrl
     if (!(Test-Path $destPath)) { New-Item -ItemType Directory -Force -Path $destPath | Out-Null }
     Push-Location $destPath
-    Write-Host "Fallback a git clone en $destPath ..."
+    Write-Host (T "repo_cloning_git" @($destPath))
     git clone $repoUrl $destPath
     Pop-Location
 }
 
-# Obtener todos los repos
-$repos = Get-GroupProjects -groupPath $GROUP
+# ---------------------------
+# Process repositories
+# ---------------------------
+$repos = Get-GroupProjects -groupPath $Group
 
 foreach ($repo in $repos) {
     $repoName = $repo.path_with_namespace
     $fullPath = Get-DestPathFromUrl $repo.web_url
 
     if (Test-Path $fullPath) {
-        Write-Host "`nRepositorio '$repoName' ya existe. Haciendo git pull..."
+        Write-Host "`n" (T "repo_exists" @($repoName))
         Set-Location $fullPath
         git pull --recurse-submodules
     } else {
-        Write-Host "`nClonando repositorio '$repoName'..."
+        Write-Host "`n" (T "repo_cloning" @($repoName))
         $repoUrl = $repo.web_url
         try {
-            Write-Host "Clonando con glab: $repoUrl"
+            Write-Host (T "repo_cloning_glab" @($repoUrl))
             & $glabCmd repo clone $repoUrl --preserve-namespace --archived=false 2>$null
-            if ($LASTEXITCODE -ne 0) { throw "glab fallo con exitcode $LASTEXITCODE" }
+            if ($LASTEXITCODE -ne 0) { throw "glab failed with exitcode $LASTEXITCODE" }
         } catch {
-            Write-Warning "glab repo clone fallo, usando git clone en fallback..."
+            Write-Warning (T "repo_clone_fail")
             Clone-WithGit $repoUrl
         }
     }
 }
 
-Write-Host "`nProceso completado. Los repos están en la carpeta $repoBase"
+Write-Host "`n" (T "done" @($repoBase))

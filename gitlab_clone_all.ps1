@@ -3,14 +3,12 @@
 # Descarga automáticamente la última versión de glab.exe desde GitLab.com
 # ---------------------------
 
-# Ruta absoluta al ejecutable local
 $localGlab = Join-Path $PSScriptRoot "glab.exe"
 
-# Comprobar si glab.exe existe en el directorio actual
+# Comprobar glab.exe
 if (-Not (Test-Path $localGlab)) {
     Write-Host "glab.exe no encontrado en el directorio actual. Buscando la última versión..."
 
-    # Query GraphQL para obtener la última release
     $query = @"
 {
   "query": "query { project(fullPath: \"gitlab-org/cli\") { releases(first: 1, sort: RELEASED_AT_DESC) { nodes { tagName assets { links { nodes { name directAssetUrl } } } } } } }",
@@ -51,30 +49,32 @@ if (-Not (Test-Path $localGlab)) {
     Write-Host "Se encontró glab.exe en el directorio actual."
 }
 
-# Alias para usar el glab local (ruta absoluta)
 $glabCmd = $localGlab
 
-# Pedir datos al usuario
-$HOSTNAME = Read-Host "Introduce el hostname de tu GitLab (ej: your-gitlab-server.com)"
-$HOSTNAME = $HOSTNAME.Trim(" ", ")")  # limpiar posibles espacios o paréntesis
-$GROUP = Read-Host "Introduce el grupo/proyecto (ej: your-group/your-project)"
-$TOKEN = Read-Host -AsSecureString "Introduce tu token personal de GitLab"
+# Valores por defecto
+$HOSTNAME = "your-gitlab-server.com"  # TODO: Replace with your GitLab hostname
+$GROUP = "your-group/your-project"   # TODO: Replace with your group/project
+$TOKEN_PLAINTEXT = "YOUR_GITLAB_TOKEN_HERE"  # TODO: Replace with your GitLab personal token
 
-# Convertir token seguro a texto plano
-$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($TOKEN)
-$TOKEN_PLAINTEXT = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+Write-Host "Usando valores por defecto:"
+Write-Host "Hostname: $HOSTNAME"
+Write-Host "Grupo/Proyecto: $GROUP"
+Write-Host "Token: (oculto por seguridad)"
+
+# Desactivar verificación SSL temporalmente
+$env:GIT_SSL_NO_VERIFY = "true"
 
 # Autenticación
 Write-Host "Autenticando en $HOSTNAME ..."
-$env:GLAB_TOKEN = $TOKEN_PLAINTEXT
-& $glabCmd auth login --hostname $HOSTNAME --token $TOKEN_PLAINTEXT
+& $glabCmd auth login --hostname $HOSTNAME --token $TOKEN_PLAINTEXT 
+git config --global core.longpaths true
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error de autenticación. Revisa tu token o hostname."
     exit 1
 }
 
-# Crear carpeta de trabajo
+# Carpeta de repos
 $repoPath = Join-Path $PSScriptRoot "gitlab_repos"
 if (-not (Test-Path $repoPath)) {
     New-Item -ItemType Directory -Path $repoPath | Out-Null
@@ -84,6 +84,5 @@ Set-Location $repoPath
 # Clonar todos los repos
 Write-Host "Clonando todos los repos de $GROUP ..."
 & $glabCmd repo clone -g $GROUP --paginate --preserve-namespace --archived=false
-
 
 Write-Host "Proceso completado. Los repos están en la carpeta gitlab_repos"

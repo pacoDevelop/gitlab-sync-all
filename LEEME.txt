@@ -1,0 +1,7 @@
+Instalar el certificado para no tener problemas de ssl
+
+Ejecutar antes el script para crear estas carpetas (reemplaza 'tu_user' con tu usuario de Windows):
+D:\Users\tu_user\.config\glab-cli
+
+Modificar el config para apuntar a tu propio host de gitlab
+y git_protocol: https

@@ -53,6 +53,14 @@ $glabCmd = $localGlab
 $HOSTNAME = "your-gitlab-server.com"  # TODO: Replace with your GitLab hostname
 $GROUP = "your-group/your-project"   # TODO: Replace with your group/project
 $TOKEN_PLAINTEXT = "YOUR_GITLAB_TOKEN_HERE"  # TODO: Replace with your GitLab personal token
+# Escapar puntos en el hostname para que se use en regex
+$escapedHostname = [Regex]::Escape($HOSTNAME)
+
+# Regex para URLs HTTPS
+$REGEXGITLABSSH = "${escapedHostname}:"
+
+# Regex para URLs SSH
+$REGEXGITLABSSH = "$escapedHostname:"
 
 Write-Host "Usando valores por defecto:"
 Write-Host "Hostname: $HOSTNAME"
@@ -107,6 +115,33 @@ function Get-GroupProjects {
     return $projects
 }
 
+# Función auxiliar: clona repo con git preservando el namespace
+function Clone-WithGit {
+    param(
+        [string]$repoUrl
+    )
+
+    # Quitar dominio y protocolo para obtener el namespace/repo
+    $parsedUrl = $repoUrl -replace "@REGEXGITLAB", ""
+    $parsedUrl = $parsedUrl -replace "^ssh://git@", "" -replace "^git@", "" -replace "@REGEXGITLABSSH", ""
+
+    $parts = $parsedUrl -split "/"
+    $repoName = $parts[-1] -replace "\.git$", ""
+    $namespace = ($parts[0..($parts.Count-2)]) -join "/"
+
+    # Crear carpeta destino preservando namespace
+    $destPath = Join-Path -Path "." -ChildPath $namespace
+    if (!(Test-Path $destPath)) {
+        New-Item -ItemType Directory -Force -Path $destPath | Out-Null
+    }
+
+    # Ejecutar git clone
+    Push-Location $destPath
+    Write-Host "Fallback a git clone en $destPath ..."
+    git clone $repoUrl
+    Pop-Location
+}
+
 # Obtener todos los repositorios del grupo y sus subgrupos
 $repos = Get-GroupProjects -groupPath $GROUP
 
@@ -120,7 +155,18 @@ foreach ($repo in $repos) {
         git pull
     } else {
         Write-Host "`nClonando repositorio '$repoName'..."
-        & $glabCmd repo clone $repo.web_url --preserve-namespace --archived=false --recurse-submodules
+        #& $glabCmd repo clone $repo.web_url --preserve-namespace --archived=false -- --recurse-submodules //si necesitas modulos
+		try {
+			Write-Host "Clonando con glab: $repoUrl"
+			& $glabCmd repo clone $repo.web_url --preserve-namespace --archived=false 2>&1
+			if ($LASTEXITCODE -ne 0) {
+				throw "glab fallo con exitcode $LASTEXITCODE"
+			}
+		}
+		catch {
+			Write-Warning "glab repo clone fallo intentando con git clone"
+			Clone-WithGit $repo.web_url
+		}
     }
 }
 

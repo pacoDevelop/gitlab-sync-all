@@ -53,14 +53,9 @@ $glabCmd = $localGlab
 $HOSTNAME = "your-gitlab-server.com"  # TODO: Replace with your GitLab hostname
 $GROUP = "your-group/your-project"   # TODO: Replace with your group/project
 $TOKEN_PLAINTEXT = "YOUR_GITLAB_TOKEN_HERE"  # TODO: Replace with your GitLab personal token
-# Escapar puntos en el hostname para que se use en regex
 $escapedHostname = [Regex]::Escape($HOSTNAME)
-
-# Regex para URLs HTTPS
+$REGEXGITLAB = "^https://$escapedHostname/"
 $REGEXGITLABSSH = "${escapedHostname}:"
-
-# Regex para URLs SSH
-$REGEXGITLABSSH = "$escapedHostname:"
 
 Write-Host "Usando valores por defecto:"
 Write-Host "Hostname: $HOSTNAME"
@@ -69,105 +64,81 @@ Write-Host "Token: (oculto por seguridad)"
 
 # Desactivar verificación SSL temporalmente
 $env:GIT_SSL_NO_VERIFY = "true"
+
+# Activar rutas largas en Git
 git config --global core.longpaths true
 
 # Autenticación
 Write-Host "Autenticando en $HOSTNAME ..."
 & $glabCmd auth login --hostname $HOSTNAME --token $TOKEN_PLAINTEXT
-
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error de autenticación. Revisa tu token o hostname."
     exit 1
 }
 
-# Carpeta de repos
-$repoPath = Join-Path $PSScriptRoot "gitlab_repos"
-if (-not (Test-Path $repoPath)) {
-    New-Item -ItemType Directory -Path $repoPath | Out-Null
-}
-Set-Location $repoPath
+# Carpeta base de repos: donde estés ejecutando el script
+$repoBase = Get-Location
 
 # Función para obtener todos los repositorios de un grupo y sus subgrupos
 function Get-GroupProjects {
-    param (
-        [string]$groupPath
-    )
-
+    param ([string]$groupPath)
     $projects = @()
     $page = 1
     $perPage = 100
-
-    # Codificar el path del grupo para que la API no devuelva 404
     $encodedGroupPath = [uri]::EscapeDataString($groupPath)
-
     do {
-		$url = "https://$HOSTNAME/api/v4/groups/$encodedGroupPath/projects?per_page=$perPage&page=$page&include_subgroups=true"
+        $url = "https://$HOSTNAME/api/v4/groups/$encodedGroupPath/projects?per_page=$perPage&page=$page&include_subgroups=true"
         $response = Invoke-RestMethod -Uri $url -Headers @{ "Private-Token" = $TOKEN_PLAINTEXT }
-
-        if ($response) {
-            $projects += $response
-            $page++
-        } else {
-            break
-        }
+        if ($response) { $projects += $response; $page++ } else { break }
     } while ($response.Count -eq $perPage)
-
     return $projects
 }
 
-# Función auxiliar: clona repo con git preservando el namespace
-function Clone-WithGit {
-    param(
-        [string]$repoUrl
-    )
-
-    # Quitar dominio y protocolo para obtener el namespace/repo
-    $parsedUrl = $repoUrl -replace "@REGEXGITLAB", ""
-    $parsedUrl = $parsedUrl -replace "^ssh://git@", "" -replace "^git@", "" -replace "@REGEXGITLABSSH", ""
-
-    $parts = $parsedUrl -split "/"
+# Función auxiliar: genera ruta segura de destino a partir de la URL
+function Get-DestPathFromUrl {
+    param([string]$repoUrl)
+    $parsed = $repoUrl -replace "$REGEXGITLAB", "" -replace "^ssh://git@", "" -replace "^git@", "" -replace "$REGEXGITLABSSH", ""
+    $parts = $parsed -split "/"
     $repoName = $parts[-1] -replace "\.git$", ""
-    $namespace = ($parts[0..($parts.Count-2)]) -join "/"
+    $namespace = ($parts[0..($parts.Count-2)]) -join "\"
+    $destPath = Join-Path -Path $repoBase -ChildPath (Join-Path $namespace $repoName)
+    return $destPath
+}
 
-    # Crear carpeta destino preservando namespace
-    $destPath = Join-Path -Path "." -ChildPath $namespace
-    if (!(Test-Path $destPath)) {
-        New-Item -ItemType Directory -Force -Path $destPath | Out-Null
-    }
-
-    # Ejecutar git clone
+# Función auxiliar: clona repo con git si falla glab
+function Clone-WithGit {
+    param([string]$repoUrl)
+    $destPath = Get-DestPathFromUrl $repoUrl
+    if (!(Test-Path $destPath)) { New-Item -ItemType Directory -Force -Path $destPath | Out-Null }
     Push-Location $destPath
     Write-Host "Fallback a git clone en $destPath ..."
-    git clone $repoUrl
+    git clone $repoUrl $destPath
     Pop-Location
 }
 
-# Obtener todos los repositorios del grupo y sus subgrupos
+# Obtener todos los repos
 $repos = Get-GroupProjects -groupPath $GROUP
 
 foreach ($repo in $repos) {
     $repoName = $repo.path_with_namespace
-    $fullPath = Join-Path $repoPath ($repoName -replace "/", "\")
+    $fullPath = Get-DestPathFromUrl $repo.web_url
 
     if (Test-Path $fullPath) {
         Write-Host "`nRepositorio '$repoName' ya existe. Haciendo git pull..."
         Set-Location $fullPath
-        git pull
+        git pull --recurse-submodules
     } else {
         Write-Host "`nClonando repositorio '$repoName'..."
-        #& $glabCmd repo clone $repo.web_url --preserve-namespace --archived=false -- --recurse-submodules //si necesitas modulos
-		try {
-			Write-Host "Clonando con glab: $repoUrl"
-			& $glabCmd repo clone $repo.web_url --preserve-namespace --archived=false 2>&1
-			if ($LASTEXITCODE -ne 0) {
-				throw "glab fallo con exitcode $LASTEXITCODE"
-			}
-		}
-		catch {
-			Write-Warning "glab repo clone fallo intentando con git clone"
-			Clone-WithGit $repo.web_url
-		}
+        $repoUrl = $repo.web_url
+        try {
+            Write-Host "Clonando con glab: $repoUrl"
+            & $glabCmd repo clone $repoUrl --preserve-namespace --archived=false 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "glab fallo con exitcode $LASTEXITCODE" }
+        } catch {
+            Write-Warning "glab repo clone fallo, usando git clone en fallback..."
+            Clone-WithGit $repoUrl
+        }
     }
 }
 
-Write-Host "`nProceso completado. Los repos están en la carpeta gitlab_repos"
+Write-Host "`nProceso completado. Los repos están en la carpeta $repoBase"
